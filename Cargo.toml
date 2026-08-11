@@ -6,3 +6,6 @@ rust-version = "1.85"
 description = "A minimal Hello World console application."
 readme = "README.md"
 publish = false
+
+[dependencies]
+rand = "0.10"
