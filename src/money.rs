@@ -45,8 +45,9 @@ impl Chips {
             return Err(MoneyError::ZeroDenominator);
         }
 
-        let product = self.0.checked_mul(numerator).ok_or(MoneyError::Overflow)?;
-        if product % denominator != 0 {
+        let product = u128::from(self.0) * u128::from(numerator);
+        let wide_denominator = u128::from(denominator);
+        if product % wide_denominator != 0 {
             return Err(MoneyError::InexactRatio {
                 amount: self,
                 numerator,
@@ -54,7 +55,9 @@ impl Chips {
             });
         }
 
-        Ok(Self(product / denominator))
+        u64::try_from(product / wide_denominator)
+            .map(Self)
+            .map_err(|_| MoneyError::Overflow)
     }
 }
 
@@ -150,6 +153,16 @@ mod tests {
         assert_eq!(
             Chips::new(5).checked_mul_ratio(1, 0),
             Err(MoneyError::ZeroDenominator)
+        );
+    }
+
+    #[test]
+    fn ratio_arithmetic_accepts_representable_result_after_large_product() {
+        let amount = Chips::new((u64::MAX / 3) + 1);
+
+        assert_eq!(
+            amount.checked_mul_ratio(3, 2),
+            Ok(Chips::new(9_223_372_036_854_775_809))
         );
     }
 

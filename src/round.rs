@@ -306,18 +306,21 @@ impl Round {
             });
         }
         let remaining = bankroll.checked_sub(amount)?;
-
-        *bankroll = remaining;
-        self.insurance_wager = amount;
         let player_natural = self
             .player_hands
             .first()
             .is_some_and(PlayerHand::is_natural);
         if self.dealer.is_two_card_twenty_one() || player_natural {
-            self.finish_settlement()?;
+            // Settle on a bounded copy so arithmetic failure cannot reserve the wager partially.
+            let mut settled = self.clone();
+            settled.insurance_wager = amount;
+            settled.finish_settlement()?;
+            *self = settled;
         } else {
+            self.insurance_wager = amount;
             self.phase = RoundPhase::PlayerTurns;
         }
+        *bankroll = remaining;
         Ok(())
     }
 
@@ -1023,6 +1026,28 @@ mod tests {
         assert_eq!(settlement.main_credit(), Chips::ZERO);
         assert_eq!(settlement.insurance_credit(), Chips::new(15));
         assert_eq!(settlement.total_credit(), Chips::new(15));
+    }
+
+    #[test]
+    fn failed_insurance_settlement_does_not_mutate_round_or_bankroll() {
+        let wager = Chips::new(u64::MAX - 1);
+        let insurance = Chips::new((u64::MAX - 1) / 2);
+        let mut shoe = Shoe::ordered(
+            [Rank::Five, Rank::Ace, Rank::Six, Rank::King]
+                .into_iter()
+                .map(card),
+        );
+        let mut round = Round::deal(wager, rules(), &mut shoe).expect("deal succeeds");
+        let mut bankroll = insurance;
+
+        assert_eq!(
+            round.place_insurance(insurance, &mut bankroll),
+            Err(RoundError::Money(crate::money::MoneyError::Overflow))
+        );
+        assert_eq!(bankroll, insurance);
+        assert_eq!(round.insurance_wager(), Chips::ZERO);
+        assert_eq!(round.phase(), RoundPhase::InsuranceOffer);
+        assert!(round.settlement().is_none());
     }
 
     #[test]
