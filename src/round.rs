@@ -260,10 +260,6 @@ impl Round {
         actions
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "called by session orchestration added in task 7")
-    )]
     pub(crate) fn act(
         &mut self,
         action: PlayerAction,
@@ -293,10 +289,6 @@ impl Round {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "called by session orchestration added in task 7")
-    )]
     pub(crate) fn place_insurance(
         &mut self,
         amount: Chips,
@@ -329,10 +321,6 @@ impl Round {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "called by session orchestration added in task 7")
-    )]
     pub(crate) fn play_dealer(&mut self, shoe: &mut Shoe) -> Result<(), RoundError> {
         if self.phase != RoundPhase::DealerTurn {
             return Err(RoundError::InvalidPhase(self.phase));
@@ -365,10 +353,6 @@ impl Round {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "called by session orchestration added in task 7")
-    )]
     pub(crate) fn take_settlement(&mut self) -> Option<RoundSettlement> {
         self.settlement.take()
     }
