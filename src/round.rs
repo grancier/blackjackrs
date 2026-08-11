@@ -31,11 +31,19 @@ pub enum HandStatus {
     Busted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandOrigin {
+    Initial,
+    Split,
+    SplitAces,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerHand {
     hand: Hand,
     wager: Chips,
     status: HandStatus,
+    origin: HandOrigin,
 }
 
 impl PlayerHand {
@@ -52,6 +60,11 @@ impl PlayerHand {
     #[must_use]
     pub const fn status(&self) -> HandStatus {
         self.status
+    }
+
+    #[must_use]
+    pub fn is_natural(&self) -> bool {
+        self.origin == HandOrigin::Initial && self.hand.is_two_card_twenty_one()
     }
 }
 
@@ -97,6 +110,7 @@ impl Round {
                 hand: player,
                 wager,
                 status,
+                origin: HandOrigin::Initial,
             }],
             dealer,
             phase,
@@ -139,9 +153,20 @@ impl Round {
         }
 
         let hand = &self.player_hands[index];
+        if hand.origin == HandOrigin::SplitAces {
+            return self
+                .can_split(index, bankroll)
+                .then_some(PlayerAction::Split)
+                .into_iter()
+                .collect();
+        }
+
         let mut actions = vec![PlayerAction::Hit, PlayerAction::Stand];
         if hand.hand.cards().len() == 2 && bankroll >= hand.wager {
             actions.push(PlayerAction::Double);
+        }
+        if self.can_split(index, bankroll) {
+            actions.push(PlayerAction::Split);
         }
         actions
     }
@@ -167,13 +192,22 @@ impl Round {
             PlayerAction::Hit => self.hit(index, shoe)?,
             PlayerAction::Stand => self.player_hands[index].status = HandStatus::Standing,
             PlayerAction::Double => self.double(index, bankroll, shoe)?,
-            PlayerAction::Split => return Err(RoundError::IllegalAction(action)),
+            PlayerAction::Split => {
+                self.split(index, bankroll, shoe)?;
+                return Ok(());
+            }
         }
 
         if self.player_hands[index].status != HandStatus::Active {
             self.advance_after(index);
         }
         Ok(())
+    }
+
+    fn can_split(&self, index: usize, bankroll: Chips) -> bool {
+        self.player_hands.len() < self.rules.maximum_hands()
+            && bankroll >= self.player_hands[index].wager
+            && self.player_hands[index].hand.split_value().is_some()
     }
 
     fn hit(&mut self, index: usize, shoe: &mut Shoe) -> Result<(), RoundError> {
@@ -215,6 +249,82 @@ impl Round {
             HandStatus::Standing
         };
         Ok(())
+    }
+
+    fn split(
+        &mut self,
+        index: usize,
+        bankroll: &mut Chips,
+        shoe: &mut Shoe,
+    ) -> Result<(), RoundError> {
+        let current = &self.player_hands[index];
+        let [first, second] = current.hand.cards() else {
+            return Err(RoundError::IllegalAction(PlayerAction::Split));
+        };
+        let wager = current.wager;
+        let remaining = bankroll.checked_sub(wager)?;
+        let [first_draw, second_draw]: [Card; 2] = shoe
+            .draw_many(2)?
+            .try_into()
+            .map_err(|_| RoundError::InvalidDeal)?;
+        let origin = if current.hand.split_value() == Some(1) {
+            HandOrigin::SplitAces
+        } else {
+            HandOrigin::Split
+        };
+        let replacements = [
+            Self::split_hand(*first, first_draw, wager, origin),
+            Self::split_hand(*second, second_draw, wager, origin),
+        ];
+
+        *bankroll = remaining;
+        self.player_hands.splice(index..=index, replacements);
+        self.normalize_split_aces(*bankroll);
+        self.active_hand = self
+            .player_hands
+            .iter()
+            .enumerate()
+            .skip(index)
+            .find_map(|(next, hand)| (hand.status == HandStatus::Active).then_some(next));
+        self.phase = if self.active_hand.is_some() {
+            RoundPhase::PlayerTurns
+        } else {
+            RoundPhase::DealerTurn
+        };
+        Ok(())
+    }
+
+    fn split_hand(card: Card, draw: Card, wager: Chips, origin: HandOrigin) -> PlayerHand {
+        let hand = Hand::from_cards([card, draw]);
+        let status = if origin == HandOrigin::SplitAces || hand.value().total == 21 {
+            if origin == HandOrigin::SplitAces && hand.split_value() == Some(1) {
+                HandStatus::Active
+            } else {
+                HandStatus::Standing
+            }
+        } else {
+            HandStatus::Active
+        };
+        PlayerHand {
+            hand,
+            wager,
+            status,
+            origin,
+        }
+    }
+
+    fn normalize_split_aces(&mut self, bankroll: Chips) {
+        let below_hand_limit = self.player_hands.len() < self.rules.maximum_hands();
+        for hand in &mut self.player_hands {
+            if hand.origin == HandOrigin::SplitAces
+                && hand.status == HandStatus::Active
+                && (!below_hand_limit
+                    || bankroll < hand.wager
+                    || hand.hand.split_value() != Some(1))
+            {
+                hand.status = HandStatus::Standing;
+            }
+        }
     }
 
     fn advance_after(&mut self, index: usize) {
@@ -449,5 +559,181 @@ mod tests {
         assert_eq!(bankroll, Chips::new(90));
         assert_eq!(round.player_hands()[0].hand().cards().len(), 2);
         assert_eq!(round.phase(), RoundPhase::PlayerTurns);
+    }
+
+    #[test]
+    fn equal_value_cards_can_split_when_funded() {
+        let (round, _) = deal_with_draws([Rank::King, Rank::Queen], [Rank::Nine, Rank::Seven], []);
+
+        assert!(
+            round
+                .legal_actions(Chips::new(10))
+                .contains(&PlayerAction::Split)
+        );
+        assert!(
+            !round
+                .legal_actions(Chips::new(9))
+                .contains(&PlayerAction::Split)
+        );
+    }
+
+    #[test]
+    fn split_reserves_matching_wager_and_deals_to_both_hands() {
+        let (mut round, mut shoe) = deal_with_draws(
+            [Rank::Eight, Rank::Eight],
+            [Rank::Nine, Rank::Seven],
+            [Rank::Three, Rank::King],
+        );
+        let mut bankroll = Chips::new(90);
+
+        round
+            .act(PlayerAction::Split, &mut bankroll, &mut shoe)
+            .expect("legal split");
+
+        assert_eq!(bankroll, Chips::new(80));
+        assert_eq!(round.player_hands().len(), 2);
+        assert_eq!(
+            round.player_hands()[0].hand().cards(),
+            &[card(Rank::Eight), card(Rank::Three)]
+        );
+        assert_eq!(
+            round.player_hands()[1].hand().cards(),
+            &[card(Rank::Eight), card(Rank::King)]
+        );
+        assert_eq!(round.active_hand_index(), Some(0));
+    }
+
+    #[test]
+    fn double_remains_legal_after_split() {
+        let (mut round, mut shoe) = deal_with_draws(
+            [Rank::Eight, Rank::Eight],
+            [Rank::Nine, Rank::Seven],
+            [Rank::Three, Rank::Two, Rank::King],
+        );
+        let mut bankroll = Chips::new(90);
+
+        round
+            .act(PlayerAction::Split, &mut bankroll, &mut shoe)
+            .expect("legal split");
+        round
+            .act(PlayerAction::Double, &mut bankroll, &mut shoe)
+            .expect("double after split");
+
+        assert_eq!(round.player_hands()[0].wager(), Chips::new(20));
+        assert_eq!(round.player_hands()[0].hand().value().total, 21);
+        assert_eq!(round.active_hand_index(), Some(1));
+        assert_eq!(bankroll, Chips::new(70));
+    }
+
+    #[test]
+    fn resplitting_stops_at_four_total_hands() {
+        let (mut round, mut shoe) = deal_with_draws(
+            [Rank::Eight, Rank::Eight],
+            [Rank::Nine, Rank::Seven],
+            [
+                Rank::Eight,
+                Rank::Eight,
+                Rank::Eight,
+                Rank::Two,
+                Rank::Three,
+                Rank::Four,
+            ],
+        );
+        let mut bankroll = Chips::new(90);
+
+        round
+            .act(PlayerAction::Split, &mut bankroll, &mut shoe)
+            .expect("first split");
+        round
+            .act(PlayerAction::Split, &mut bankroll, &mut shoe)
+            .expect("first resplit");
+        round
+            .act(PlayerAction::Split, &mut bankroll, &mut shoe)
+            .expect("second resplit");
+        round
+            .act(PlayerAction::Stand, &mut bankroll, &mut shoe)
+            .expect("stand first");
+        round
+            .act(PlayerAction::Stand, &mut bankroll, &mut shoe)
+            .expect("stand second");
+        round
+            .act(PlayerAction::Stand, &mut bankroll, &mut shoe)
+            .expect("stand third");
+
+        assert_eq!(round.player_hands().len(), 4);
+        assert_eq!(round.active_hand_index(), Some(3));
+        assert!(!round.legal_actions(bankroll).contains(&PlayerAction::Split));
+        assert_eq!(
+            round.act(PlayerAction::Split, &mut bankroll, &mut shoe),
+            Err(RoundError::IllegalAction(PlayerAction::Split))
+        );
+    }
+
+    #[test]
+    fn split_aces_take_one_card_each_and_stand() {
+        let (mut round, mut shoe) = deal_with_draws(
+            [Rank::Ace, Rank::Ace],
+            [Rank::Nine, Rank::Seven],
+            [Rank::Nine, Rank::King],
+        );
+        let mut bankroll = Chips::new(90);
+
+        round
+            .act(PlayerAction::Split, &mut bankroll, &mut shoe)
+            .expect("legal split");
+
+        assert_eq!(round.player_hands().len(), 2);
+        assert!(round.player_hands().iter().all(|hand| {
+            hand.hand().cards().len() == 2 && hand.status() == HandStatus::Standing
+        }));
+        assert_eq!(round.phase(), RoundPhase::DealerTurn);
+    }
+
+    #[test]
+    fn split_aces_can_resplit_when_another_ace_is_dealt() {
+        let (mut round, mut shoe) = deal_with_draws(
+            [Rank::Ace, Rank::Ace],
+            [Rank::Nine, Rank::Seven],
+            [Rank::Ace, Rank::Nine, Rank::Five, Rank::Six],
+        );
+        let mut bankroll = Chips::new(90);
+
+        round
+            .act(PlayerAction::Split, &mut bankroll, &mut shoe)
+            .expect("split Aces");
+        assert_eq!(round.legal_actions(bankroll), vec![PlayerAction::Split]);
+        round
+            .act(PlayerAction::Split, &mut bankroll, &mut shoe)
+            .expect("resplit Aces");
+
+        assert_eq!(round.player_hands().len(), 3);
+        assert!(
+            round
+                .player_hands()
+                .iter()
+                .all(|hand| hand.status() == HandStatus::Standing)
+        );
+        assert_eq!(round.phase(), RoundPhase::DealerTurn);
+    }
+
+    #[test]
+    fn post_split_twenty_one_is_not_a_natural() {
+        let (mut round, mut shoe) = deal_with_draws(
+            [Rank::King, Rank::Queen],
+            [Rank::Nine, Rank::Seven],
+            [Rank::Ace, Rank::Ace],
+        );
+        let mut bankroll = Chips::new(90);
+
+        round
+            .act(PlayerAction::Split, &mut bankroll, &mut shoe)
+            .expect("legal split");
+
+        assert!(
+            round
+                .player_hands()
+                .iter()
+                .all(|hand| { hand.hand().is_two_card_twenty_one() && !hand.is_natural() })
+        );
     }
 }
