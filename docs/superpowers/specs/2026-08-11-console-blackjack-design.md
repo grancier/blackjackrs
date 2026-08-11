@@ -1,6 +1,6 @@
 # Console Blackjack Design
 
-Status: Approved
+Status: Implemented
 
 Date: 2026-08-11
 
@@ -171,6 +171,17 @@ cards, wagers, or phases directly.
 No repository, service, strategy, or event-bus traits are introduced. The
 current requirements have only one implementation of each concern.
 
+### Implementation boundaries
+
+`Round` exposes read-only state to callers. Its action, insurance, dealer-play,
+and settlement-consumption methods are crate-private and are called by
+`Session`. This makes `Session` the only production path that can reserve a
+wager or credit a settlement.
+
+The console accepts buffered readers and writers. Unit tests exercise parsing
+and I/O failures without process globals, while `main.rs` only constructs
+entropy and locked standard streams and maps fatal errors to a nonzero exit.
+
 ## Domain model
 
 The design uses enums and newtypes instead of stringly typed values and
@@ -316,12 +327,13 @@ The branch uses all three major-feature slots:
 | Bankroll session and CLI | 1.64 | Discussed and approved |
 | Secure shoe and RNG | 4.43 | Implement now |
 
-No backlog file exists. The branch starts with zero changed lines, zero new
-files, and zero commits relative to `main`.
+No backlog file exists. At design approval, implementation work had zero
+changed lines, zero new files, and zero commits relative to `main`.
 
-The implementation target is below 1,500 changed lines. Crossing 1,000 lines
-triggers a scope review; crossing 1,500 requires splitting work before
-continuing. No fourth major feature may enter this branch.
+At design approval, the implementation target was below 1,500 production
+lines. The 1,000-line scope review confirmed that the branch still contained
+only the three approved components. No fourth major feature entered the
+branch.
 
 ## Alternatives rejected
 
