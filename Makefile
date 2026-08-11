@@ -16,7 +16,7 @@ help: ## Show available targets
 		'clean        Remove Cargo build artifacts'
 
 demo: ## Run the application and print its live output
-	@$(CARGO) run --quiet
+	@printf '100\n\n\n\n10\n0\nstand\nquit\n' | $(CARGO) run --quiet
 
 run: ## Run the application
 	$(CARGO) run
