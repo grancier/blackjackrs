@@ -1,0 +1,8 @@
+[package]
+name = "blackjackrs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A minimal Hello World console application."
+readme = "README.md"
+publish = false
